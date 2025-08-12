@@ -1,0 +1,116 @@
+#!/bin/bash
+
+# netcheck 0.1.0
+VERSION="0.1.0"
+
+usage() {
+  cat <<EOF
+netcheck $VERSION
+
+Usage:
+  netcheck <host-or-ip>
+  netcheck --version
+  netcheck --help
+
+Examples:
+  netcheck example.com
+  netcheck 10.1.1.1
+EOF
+}
+
+# handling arguments in CLI
+case "${1:-}" in
+  "" )           echo "use netcheck --help for more information"; exit 0 ;;
+  -h|--help)     usage; exit 0 ;;
+  -v|--version)  echo "netcheck $VERSION"; exit 0 ;;
+esac
+
+HOST="$1"
+
+# checks if command exists, used for checking deps
+have() { command -v "$1" >/dev/null 2>&1; }
+print_row() { printf "%-8s %-8s %s\n" "$1" "$2" "$3"; }
+
+do_ping() {
+  local out loss avg recv
+  out="$(ping "$HOST" -c 4)"
+  loss="$(grep -Eo '[0-9]+(\.[0-9]+)?%' <<<"$out")"
+  recv="$(grep -Eo '[0-9]+ received' <<<"$out" | awk '{print $1}')"
+  avg="$(grep -E 'rtt' <<<"$out" | awk -F'= ' '{print $2}' | awk -F'/' '{print $2}')"
+
+  if [[ -n "${recv:-}" && "${recv:-0}" -gt 0 && "${loss:-}" != "100%" ]]; then
+  printf "OK\navg: %s ms | packet loss: %s\n" "${avg:-N/A}" "${loss:-N/A}"
+  else
+  printf "FAIL\navg: %s ms | packet loss: %s\n" "${avg:-N/A}" "${loss:-N/A}"
+  fi
+}
+
+# defaults to dig, maybe default to nslookup for IPv6 lookups?
+do_dns() {
+  local dns_raw dns_out
+  if have dig; then
+    dns_raw="$(dig +short "$HOST")"
+  elif have nslookup; then
+    dns_raw="$(nslookup "$HOST" | awk '/^Address: /{print $2}')"
+  else
+    printf "FAIL %-3s DNS resolver not found"
+    return
+  fi
+
+  if [[ -n "$dns_raw" ]]; then
+    dns_out="$(printf "%s\n" "$dns_raw" | awk '{printf "%d: %s\n", NR, $0}')"
+    printf "OK\n%s\n" "$dns_out"
+  else
+    printf "FAIL %-3s Could not resolve DNS"
+  fi
+}
+
+# only have traceroute now, might add tracepath later
+do_traceroute() {
+  local out rc hops
+  if have traceroute; then
+    out="$(traceroute -n -w 1 "$HOST")"; rc=$?
+    hops="$(printf "%s\n" "$out" | awk 'NR>1 {if ($2!="*" && $2!="???"){i++; printf "%d: %s\n", i, $2}}')"
+  else
+    printf "FAIL %-3s traceroute not found"
+    return
+  fi
+
+  if [[ $rc = 0 && -n "${hops:-}" ]]; then
+    printf "OK\n%s\n" "$hops"
+  fi
+}
+
+# ping
+ping_out="$(do_ping)"
+ping_status="$(printf "%s" "$ping_out" | head -n1)"
+ping_details="$(printf "%s" "$ping_out" | tail -n +2)"
+
+# dns
+dns_out="$(do_dns)"
+dns_status="$(printf "%s" "$dns_out" | head -n1)"
+dns_details="$(printf "%s" "$dns_out" | tail -n +2)"
+dns_first_line="$(printf "%s" "$dns_details" | head -n1)"
+
+# route
+route_out="$(do_traceroute)"
+route_status="$(printf "%s" "$route_out" | head -n1)"
+route_details="$(printf "%s" "$route_out" | tail -n +2)"
+
+route_first_line="$(printf "%s" "$route_details" | head -n1)"
+
+# print results
+print_row "TEST" "STATUS" "DETAILS"
+print_row "ping" "$ping_status" "$ping_details"
+echo
+
+print_row "dns" "$dns_status" "$dns_first_line"
+printf "%s" "$dns_details" | tail -n +2 | while IFS= read -r line || [[ -n "$line" ]]; do
+  printf "%-8s %-8s %s\n" "" "" "$line"
+done
+echo
+
+print_row "route" "$route_status" "$route_first_line"
+printf "%s" "$route_details" | tail -n +2 | while IFS= read -r hop || [[ -n "$hop" ]]; do
+  printf "%-8s %-8s %s\n" "" "" "$hop"
+done
